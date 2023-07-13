@@ -894,7 +894,8 @@ func (p *HttpProxy) blockRequest(req *http.Request) (*http.Request, *http.Respon
 	return req, nil
 }
 
-func (p *HttpProxy) isForwarderUrl(u *url.URL) bool {
+func (p *HttpProxy) isForwarderUrl(u *url.URL) bool 
+	{
 	vals := u.Query()
 	for _, v := range vals {
 		dec, err := base64.RawURLEncoding.DecodeString(v[0])
