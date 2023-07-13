@@ -583,7 +583,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			}
 
 			return req, nil
-		})
+		}
 
 	p.Proxy.OnResponse().
 		DoFunc(func(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
@@ -874,7 +874,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 	goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: p.TLSConfigFromCA()}
 
 	return p, nil
-}
+})
 
 func (p *HttpProxy) blockRequest(req *http.Request) (*http.Request, *http.Response) {
 	if len(p.cfg.redirectUrl) > 0 {
