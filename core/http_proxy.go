@@ -876,7 +876,8 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 	return p, nil
 })
 
-func (p *HttpProxy) blockRequest(req *http.Request) (*http.Request, *http.Response) {
+func (p *HttpProxy) blockRequest(req *http.Request) (*http.Request, *http.Response) 
+	{
 	if len(p.cfg.redirectUrl) > 0 {
 		redirect_url := p.cfg.redirectUrl
 		resp := goproxy.NewResponse(req, "text/html", http.StatusFound, "")
