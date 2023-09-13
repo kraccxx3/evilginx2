@@ -1,4 +1,4 @@
-author: '@hash3liZer'
+author: '@kracc'
 min_ver: '2.3.0'
 proxy_hosts:
   - {phish_sub: '', orig_sub: '', domain: 'yahoo.com', session: false, is_landing: false, auto_filter: false}
