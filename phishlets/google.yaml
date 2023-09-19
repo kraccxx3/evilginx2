@@ -35,7 +35,7 @@ credentials:
 
 auth_urls:
   - '/CheckCookie'
-  - '/v3/signin/_/AccountsSignInUi/data/batchexecute'
+  #  - '/v3/signin/_/AccountsSignInUi/data/batchexecute'
 
 login:
   domain: 'accounts.google.com'
